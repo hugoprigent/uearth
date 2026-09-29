@@ -2,6 +2,7 @@ import { useRef, useMemo } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Line, Text } from '@react-three/drei';
 import * as THREE from 'three';
+import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import { useGeoStore } from '../store/geoStore';
 import { calculateEarthSunDistance, calculateOrbitalAngle, getSeason } from '../utils/solarCalculations';
 
@@ -279,7 +280,7 @@ function DynamicEarth() {
 // Camera controller for Earth-centered view
 function CameraController() {
   const { solarSystemCenter } = useGeoStore();
-  const controlsRef = useRef<any>(null);
+  const controlsRef = useRef<OrbitControlsImpl>(null);
 
   useFrame(() => {
     const { solarSystemCenter, dayOfYear } = useGeoStore.getState();

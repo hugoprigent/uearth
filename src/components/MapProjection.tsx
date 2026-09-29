@@ -24,6 +24,216 @@ interface MapProjectionProps {
   className?: string;
 }
 
+// Draw night overlay
+function drawNightOverlay(
+  ctx: CanvasRenderingContext2D,
+  projection: GeoProjection,
+  width: number,
+  height: number,
+  date: Date
+) {
+  const subsolar = calculateSubsolarPoint(date);
+  
+  const scale = 4;
+  const offscreen = document.createElement('canvas');
+  offscreen.width = Math.ceil(width / scale);
+  offscreen.height = Math.ceil(height / scale);
+  const offCtx = offscreen.getContext('2d');
+  if (!offCtx) return;
+
+  const imageData = offCtx.createImageData(offscreen.width, offscreen.height);
+  const data = imageData.data;
+
+  for (let y = 0; y < offscreen.height; y++) {
+    for (let x = 0; x < offscreen.width; x++) {
+      const coords = projection.invert?.([x * scale, y * scale]);
+      if (!coords) continue;
+
+      const [lon, lat] = coords;
+      if (isNaN(lat) || isNaN(lon)) continue;
+      if (lat < -90 || lat > 90) continue;
+
+      const lat1 = lat * (Math.PI / 180);
+      const lat2 = subsolar.lat * (Math.PI / 180);
+      const dLon = (lon - subsolar.lon) * (Math.PI / 180);
+
+      const angularDist = Math.acos(
+        Math.max(-1, Math.min(1,
+          Math.sin(lat1) * Math.sin(lat2) +
+          Math.cos(lat1) * Math.cos(lat2) * Math.cos(dLon)
+        ))
+      );
+
+      const idx = (y * offscreen.width + x) * 4;
+      
+      if (angularDist > Math.PI / 2) {
+        data[idx] = 15;
+        data[idx + 1] = 23;
+        data[idx + 2] = 42;
+        data[idx + 3] = 160;
+      } else if (angularDist > Math.PI / 2 - 0.1) {
+        const twilight = (angularDist - (Math.PI / 2 - 0.1)) / 0.1;
+        data[idx] = 15;
+        data[idx + 1] = 23;
+        data[idx + 2] = 42;
+        data[idx + 3] = Math.floor(twilight * 160);
+      }
+    }
+  }
+
+  offCtx.putImageData(imageData, 0, 0);
+  
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(offscreen, 0, 0, width, height);
+  ctx.restore();
+}
+
+// Draw all lines; lines drawn on another view are re-projected point by point
+function drawLines(
+  ctx: CanvasRenderingContext2D,
+  projection: GeoProjection,
+  lines: LineSegment[],
+  width: number,
+  viewKey: ProjectionType
+) {
+  for (const line of lines) {
+    ctx.beginPath();
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = 3;
+
+    let points: GeoCoordinates[] = [];
+
+    if (line.sourceView === viewKey) {
+      // This line was drawn on this view - draw as straight line
+      const startProjected = projection([line.start.lon, line.start.lat]);
+      const endProjected = projection([line.end.lon, line.end.lat]);
+      if (startProjected && endProjected) {
+        ctx.moveTo(startProjected[0], startProjected[1]);
+        ctx.lineTo(endProjected[0], endProjected[1]);
+      }
+      ctx.stroke();
+    } else {
+      // Line from another view - need to project points
+      if (line.sourceView === 'globe') {
+        // Globe = geodesic
+        points = greatCirclePoints(line.start, line.end, 100);
+      } else if (line.sourceView === 'azimuthal') {
+        // From azimuthal - unproject
+        const azimuthalProj = geoAzimuthalEquidistant()
+          .scale(100)
+          .translate([0, 0])
+          .rotate([0, -90]);
+
+        const startAz = azimuthalProj([line.start.lon, line.start.lat]);
+        const endAz = azimuthalProj([line.end.lon, line.end.lat]);
+
+        if (startAz && endAz) {
+          for (let i = 0; i <= 100; i++) {
+            const t = i / 100;
+            const x = startAz[0] + t * (endAz[0] - startAz[0]);
+            const y = startAz[1] + t * (endAz[1] - startAz[1]);
+            const coords = azimuthalProj.invert?.([x, y]);
+            if (coords) {
+              points.push({ lon: coords[0], lat: coords[1] });
+            }
+          }
+        }
+      } else if (line.sourceView === 'mercator') {
+        // From Mercator - unproject
+        const mercatorProj = geoMercator()
+          .scale(100)
+          .translate([0, 0]);
+
+        const startM = mercatorProj([line.start.lon, line.start.lat]);
+        const endM = mercatorProj([line.end.lon, line.end.lat]);
+
+        if (startM && endM) {
+          for (let i = 0; i <= 100; i++) {
+            const t = i / 100;
+            const x = startM[0] + t * (endM[0] - startM[0]);
+            const y = startM[1] + t * (endM[1] - startM[1]);
+            const coords = mercatorProj.invert?.([x, y]);
+            if (coords) {
+              points.push({ lon: coords[0], lat: coords[1] });
+            }
+          }
+        }
+      }
+
+      // Draw the interpolated points
+      let started = false;
+      let lastProjected: [number, number] | null = null;
+      
+      for (const point of points) {
+        const projected = projection([point.lon, point.lat]);
+        if (projected && isFinite(projected[0]) && isFinite(projected[1])) {
+          // Detect wrap-around
+          if (lastProjected && Math.abs(projected[0] - lastProjected[0]) > width / 2) {
+            started = false;
+          }
+          
+          if (!started) {
+            ctx.moveTo(projected[0], projected[1]);
+            started = true;
+          } else {
+            ctx.lineTo(projected[0], projected[1]);
+          }
+          lastProjected = projected;
+        }
+      }
+      ctx.stroke();
+    }
+
+    // Draw endpoints
+    const startProjected = projection([line.start.lon, line.start.lat]);
+    const endProjected = projection([line.end.lon, line.end.lat]);
+
+    if (startProjected) {
+      ctx.beginPath();
+      ctx.arc(startProjected[0], startProjected[1], 5, 0, 2 * Math.PI);
+      ctx.fillStyle = line.color;
+      ctx.fill();
+    }
+
+    if (endProjected) {
+      ctx.beginPath();
+      ctx.arc(endProjected[0], endProjected[1], 5, 0, 2 * Math.PI);
+      ctx.fillStyle = line.color;
+      ctx.fill();
+    }
+
+    // Draw distance label at midpoint
+    if (startProjected && endProjected && line.distance > 0) {
+      const midX = (startProjected[0] + endProjected[0]) / 2;
+      const midY = (startProjected[1] + endProjected[1]) / 2;
+      
+      // Format distance
+      const distanceText = line.distance >= 1000 
+        ? `${(line.distance / 1000).toFixed(1)}k km`
+        : `${line.distance.toFixed(0)} km`;
+      
+      // Draw background
+      ctx.font = 'bold 11px monospace';
+      const textWidth = ctx.measureText(distanceText).width;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+      ctx.fillRect(midX - textWidth / 2 - 4, midY - 8, textWidth + 8, 16);
+      
+      // Draw border
+      ctx.strokeStyle = line.color;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(midX - textWidth / 2 - 4, midY - 8, textWidth + 8, 16);
+      
+      // Draw text
+      ctx.fillStyle = '#f1f5f9';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(distanceText, midX, midY);
+    }
+  }
+}
+
 export function MapProjection({ projectionType, title, className = '' }: MapProjectionProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -217,7 +427,7 @@ export function MapProjection({ projectionType, title, className = '' }: MapProj
     }
 
     // Draw lines
-    drawLines(ctx, projection, lines, width);
+    drawLines(ctx, projection, lines, width, projectionType);
 
     // Draw selected point
     if (selectedPoint) {
@@ -257,217 +467,6 @@ export function MapProjection({ projectionType, title, className = '' }: MapProj
       }
     }
   }, [land, createProjection, projectionType, hoverCoords, selectedPoint, lines, dateTime, showSun, zoom, offset]);
-
-  // Draw night overlay
-  const drawNightOverlay = (
-    ctx: CanvasRenderingContext2D,
-    projection: GeoProjection,
-    width: number,
-    height: number,
-    date: Date
-  ) => {
-    const subsolar = calculateSubsolarPoint(date);
-    
-    const scale = 4;
-    const offscreen = document.createElement('canvas');
-    offscreen.width = Math.ceil(width / scale);
-    offscreen.height = Math.ceil(height / scale);
-    const offCtx = offscreen.getContext('2d');
-    if (!offCtx) return;
-
-    const imageData = offCtx.createImageData(offscreen.width, offscreen.height);
-    const data = imageData.data;
-
-    for (let y = 0; y < offscreen.height; y++) {
-      for (let x = 0; x < offscreen.width; x++) {
-        const coords = projection.invert?.([x * scale, y * scale]);
-        if (!coords) continue;
-
-        const [lon, lat] = coords;
-        if (isNaN(lat) || isNaN(lon)) continue;
-        if (lat < -90 || lat > 90) continue;
-
-        const lat1 = lat * (Math.PI / 180);
-        const lat2 = subsolar.lat * (Math.PI / 180);
-        const dLon = (lon - subsolar.lon) * (Math.PI / 180);
-
-        const angularDist = Math.acos(
-          Math.max(-1, Math.min(1,
-            Math.sin(lat1) * Math.sin(lat2) +
-            Math.cos(lat1) * Math.cos(lat2) * Math.cos(dLon)
-          ))
-        );
-
-        const idx = (y * offscreen.width + x) * 4;
-        
-        if (angularDist > Math.PI / 2) {
-          data[idx] = 15;
-          data[idx + 1] = 23;
-          data[idx + 2] = 42;
-          data[idx + 3] = 160;
-        } else if (angularDist > Math.PI / 2 - 0.1) {
-          const twilight = (angularDist - (Math.PI / 2 - 0.1)) / 0.1;
-          data[idx] = 15;
-          data[idx + 1] = 23;
-          data[idx + 2] = 42;
-          data[idx + 3] = Math.floor(twilight * 160);
-        }
-      }
-    }
-
-    offCtx.putImageData(imageData, 0, 0);
-    
-    ctx.save();
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(offscreen, 0, 0, width, height);
-    ctx.restore();
-  };
-
-  // Draw all lines - now handles different source views
-  const drawLines = (
-    ctx: CanvasRenderingContext2D,
-    projection: GeoProjection,
-    lines: LineSegment[],
-    width: number
-  ) => {
-    const viewKey = projectionType;
-    
-    for (const line of lines) {
-      ctx.beginPath();
-      ctx.strokeStyle = line.color;
-      ctx.lineWidth = 3;
-
-      let points: GeoCoordinates[] = [];
-
-      if (line.sourceView === viewKey) {
-        // This line was drawn on this view - draw as straight line
-        const startProjected = projection([line.start.lon, line.start.lat]);
-        const endProjected = projection([line.end.lon, line.end.lat]);
-        if (startProjected && endProjected) {
-          ctx.moveTo(startProjected[0], startProjected[1]);
-          ctx.lineTo(endProjected[0], endProjected[1]);
-        }
-        ctx.stroke();
-      } else {
-        // Line from another view - need to project points
-        if (line.sourceView === 'globe') {
-          // Globe = geodesic
-          points = greatCirclePoints(line.start, line.end, 100);
-        } else if (line.sourceView === 'azimuthal') {
-          // From azimuthal - unproject
-          const azimuthalProj = geoAzimuthalEquidistant()
-            .scale(100)
-            .translate([0, 0])
-            .rotate([0, -90]);
-
-          const startAz = azimuthalProj([line.start.lon, line.start.lat]);
-          const endAz = azimuthalProj([line.end.lon, line.end.lat]);
-
-          if (startAz && endAz) {
-            for (let i = 0; i <= 100; i++) {
-              const t = i / 100;
-              const x = startAz[0] + t * (endAz[0] - startAz[0]);
-              const y = startAz[1] + t * (endAz[1] - startAz[1]);
-              const coords = azimuthalProj.invert?.([x, y]);
-              if (coords) {
-                points.push({ lon: coords[0], lat: coords[1] });
-              }
-            }
-          }
-        } else if (line.sourceView === 'mercator') {
-          // From Mercator - unproject
-          const mercatorProj = geoMercator()
-            .scale(100)
-            .translate([0, 0]);
-
-          const startM = mercatorProj([line.start.lon, line.start.lat]);
-          const endM = mercatorProj([line.end.lon, line.end.lat]);
-
-          if (startM && endM) {
-            for (let i = 0; i <= 100; i++) {
-              const t = i / 100;
-              const x = startM[0] + t * (endM[0] - startM[0]);
-              const y = startM[1] + t * (endM[1] - startM[1]);
-              const coords = mercatorProj.invert?.([x, y]);
-              if (coords) {
-                points.push({ lon: coords[0], lat: coords[1] });
-              }
-            }
-          }
-        }
-
-        // Draw the interpolated points
-        let started = false;
-        let lastProjected: [number, number] | null = null;
-        
-        for (const point of points) {
-          const projected = projection([point.lon, point.lat]);
-          if (projected && isFinite(projected[0]) && isFinite(projected[1])) {
-            // Detect wrap-around
-            if (lastProjected && Math.abs(projected[0] - lastProjected[0]) > width / 2) {
-              started = false;
-            }
-            
-            if (!started) {
-              ctx.moveTo(projected[0], projected[1]);
-              started = true;
-            } else {
-              ctx.lineTo(projected[0], projected[1]);
-            }
-            lastProjected = projected;
-          }
-        }
-        ctx.stroke();
-      }
-
-      // Draw endpoints
-      const startProjected = projection([line.start.lon, line.start.lat]);
-      const endProjected = projection([line.end.lon, line.end.lat]);
-
-      if (startProjected) {
-        ctx.beginPath();
-        ctx.arc(startProjected[0], startProjected[1], 5, 0, 2 * Math.PI);
-        ctx.fillStyle = line.color;
-        ctx.fill();
-      }
-
-      if (endProjected) {
-        ctx.beginPath();
-        ctx.arc(endProjected[0], endProjected[1], 5, 0, 2 * Math.PI);
-        ctx.fillStyle = line.color;
-        ctx.fill();
-      }
-
-      // Draw distance label at midpoint
-      if (startProjected && endProjected && line.distance > 0) {
-        const midX = (startProjected[0] + endProjected[0]) / 2;
-        const midY = (startProjected[1] + endProjected[1]) / 2;
-        
-        // Format distance
-        const distanceText = line.distance >= 1000 
-          ? `${(line.distance / 1000).toFixed(1)}k km`
-          : `${line.distance.toFixed(0)} km`;
-        
-        // Draw background
-        ctx.font = 'bold 11px monospace';
-        const textWidth = ctx.measureText(distanceText).width;
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-        ctx.fillRect(midX - textWidth / 2 - 4, midY - 8, textWidth + 8, 16);
-        
-        // Draw border
-        ctx.strokeStyle = line.color;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(midX - textWidth / 2 - 4, midY - 8, textWidth + 8, 16);
-        
-        // Draw text
-        ctx.fillStyle = '#f1f5f9';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(distanceText, midX, midY);
-      }
-    }
-  };
 
   // Handle mouse events for hover and click
   useEffect(() => {

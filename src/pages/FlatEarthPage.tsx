@@ -213,28 +213,24 @@ function Firmament() {
   );
 }
 
-// Stars on the firmament
-function Stars() {
-  const stars = useMemo(() => {
-    const starPositions: THREE.Vector3[] = [];
-    for (let i = 0; i < 200; i++) {
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.random() * (Math.PI / 2) * 0.9; // Limit to dome area
-      // Position on dome surface
-      const y = Math.sin(phi) * DOME_HEIGHT;
-      const horizontalR = Math.cos(phi) * DOME_RADIUS * 0.98;
-      starPositions.push(new THREE.Vector3(
-        horizontalR * Math.cos(theta),
-        y,
-        horizontalR * Math.sin(theta)
-      ));
-    }
-    return starPositions;
-  }, []);
+// Stars on the firmament, placed once at module load so they stay put across renders
+const STAR_POSITIONS: THREE.Vector3[] = Array.from({ length: 200 }, () => {
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.random() * (Math.PI / 2) * 0.9; // Limit to dome area
+  // Position on dome surface
+  const y = Math.sin(phi) * DOME_HEIGHT;
+  const horizontalR = Math.cos(phi) * DOME_RADIUS * 0.98;
+  return new THREE.Vector3(
+    horizontalR * Math.cos(theta),
+    y,
+    horizontalR * Math.sin(theta)
+  );
+});
 
+function Stars() {
   return (
     <group>
-      {stars.map((pos, i) => (
+      {STAR_POSITIONS.map((pos, i) => (
         <mesh key={i} position={pos}>
           <sphereGeometry args={[0.02, 8, 8]} />
           <meshBasicMaterial color="#ffffff" />
@@ -672,8 +668,23 @@ function FlatEarthInfoPanel() {
   );
 }
 
+// 2D map geometry, in SVG units
+const MAP_SIZE = 800;
+const MAP_DISC_RADIUS = 350;
+const MAP_CENTER = MAP_SIZE / 2;
+
+// Convert lat/lon to 2D coordinates (Azimuthal equidistant from North Pole)
+function latLonTo2D(lat: number, lon: number) {
+  const latRad = (90 - lat) * (Math.PI / 180);
+  const lonRad = lon * (Math.PI / 180);
+  const r = (latRad / Math.PI) * MAP_DISC_RADIUS;
+  const x = MAP_CENTER + r * Math.sin(lonRad);
+  const y = MAP_CENTER - r * Math.cos(lonRad);
+  return { x, y };
+}
+
 // 2D Map View Component with pan/zoom and day/night
-function FlatEarth2DView({ compact = false }: { compact?: boolean }) {
+function FlatEarth2DView({ compact = false, spotlightRadiusFactor = 0.35 }: { compact?: boolean, spotlightRadiusFactor?: number }) {
   const { land } = useWorldData();
   const { 
     dayOfYear, 
@@ -694,19 +705,9 @@ function FlatEarth2DView({ compact = false }: { compact?: boolean }) {
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   
-  const baseSize = 800;
-  const earthRadiusPx = 350;
-  const center = baseSize / 2;
-  
-  // Convert lat/lon to 2D coordinates (Azimuthal equidistant from North Pole)
-  const latLonTo2D = (lat: number, lon: number) => {
-    const latRad = (90 - lat) * (Math.PI / 180);
-    const lonRad = lon * (Math.PI / 180);
-    const r = (latRad / Math.PI) * earthRadiusPx;
-    const x = center + r * Math.sin(lonRad);
-    const y = center - r * Math.cos(lonRad);
-    return { x, y };
-  };
+  const baseSize = MAP_SIZE;
+  const earthRadiusPx = MAP_DISC_RADIUS;
+  const center = MAP_CENTER;
   
   // Convert 2D coordinates back to lat/lon
   const xy2DToLatLon = (x: number, y: number): { lat: number; lon: number } | null => {
@@ -922,12 +923,15 @@ function FlatEarth2DView({ compact = false }: { compact?: boolean }) {
           onClick={handleClick}
         >
           <defs>
-            {/* Gradient for night shadow */}
-            <radialGradient id="sunLight" cx={sunX} cy={sunY} r={earthRadiusPx * 0.8} gradientUnits="userSpaceOnUse">
-              <stop offset="0%" stopColor="transparent" />
-              <stop offset="70%" stopColor="transparent" />
-              <stop offset="100%" stopColor="rgba(0,0,30,0.7)" />
+            {/* Spotlight: the mask hides the night overlay inside the lit circle, with a soft edge */}
+            <radialGradient id="spotlightFade">
+              <stop offset="85%" stopColor="black" />
+              <stop offset="100%" stopColor="white" />
             </radialGradient>
+            <mask id="spotlightMask">
+              <rect x={0} y={0} width={baseSize} height={baseSize} fill="white" />
+              <circle cx={sunX} cy={sunY} r={earthRadiusPx * spotlightRadiusFactor} fill="url(#spotlightFade)" />
+            </mask>
             
             {/* Clip path for earth disc */}
             <clipPath id="earthClip">
@@ -996,22 +1000,15 @@ function FlatEarth2DView({ compact = false }: { compact?: boolean }) {
             />
           ))}
           
-          {/* Night shadow - spotlight effect */}
+          {/* Night shadow: in the flat earth model the sun is a local spotlight,
+              so only a circle around the sun is lit and the rest of the disc is dark. */}
           <g clipPath="url(#earthClip)">
-            <circle 
-              cx={center} 
-              cy={center} 
-              r={earthRadiusPx} 
-              fill="url(#sunLight)"
-            />
-            {/* Additional darker area opposite to sun */}
-            <ellipse
-              cx={center + (center - sunX) * 0.7}
-              cy={center + (center - sunY) * 0.7}
-              rx={earthRadiusPx * 0.6}
-              ry={earthRadiusPx * 0.6}
-              fill="rgba(0,0,30,0.5)"
-              style={{ mixBlendMode: 'multiply' }}
+            <circle
+              cx={center}
+              cy={center}
+              r={earthRadiusPx}
+              fill="rgba(0,0,40,0.55)"
+              mask="url(#spotlightMask)"
             />
           </g>
           
@@ -1208,6 +1205,7 @@ function FlatEarth2DView({ compact = false }: { compact?: boolean }) {
 // Main Flat Earth Page component
 export function FlatEarthPage() {
   const [viewMode, setViewMode] = useState<'3d' | '2d' | 'both'>('both');
+  const [spotlightRadiusFactor, setSpotlightRadiusFactor] = useState(0.35); // 0.1 to 1.0
   
   return (
     <div className="h-screen bg-slate-900 text-slate-100 flex flex-col">
@@ -1265,6 +1263,26 @@ export function FlatEarthPage() {
             </button>
           </div>
           
+          {/* Spotlight radius control */}
+          {(viewMode === '2d' || viewMode === 'both') && (
+            <>
+              <div className="h-6 w-px bg-slate-700" />
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-400">☀️ Rayon éclairé:</span>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="1.0"
+                  step="0.01"
+                  value={spotlightRadiusFactor}
+                  onChange={(e) => setSpotlightRadiusFactor(parseFloat(e.target.value))}
+                  className="w-20 h-1.5 accent-amber-500"
+                />
+                <span className="text-xs text-amber-400 w-10">{Math.round(spotlightRadiusFactor * 100)}%</span>
+              </div>
+            </>
+          )}
+          
           <div className="h-6 w-px bg-slate-700" />
           
           <Link 
@@ -1312,7 +1330,7 @@ export function FlatEarthPage() {
       
       {viewMode === '2d' && (
         <div className="flex-1 relative">
-          <FlatEarth2DView />
+          <FlatEarth2DView spotlightRadiusFactor={spotlightRadiusFactor} />
           <FlatEarthInfoPanel />
         </div>
       )}
@@ -1353,7 +1371,7 @@ export function FlatEarthPage() {
             <div className="absolute top-2 left-2 z-10 bg-slate-800/80 px-2 py-1 rounded text-xs text-amber-400">
               Carte 2D (distances FE)
             </div>
-            <FlatEarth2DView compact={false} />
+            <FlatEarth2DView compact={false} spotlightRadiusFactor={spotlightRadiusFactor} />
           </div>
           
           {/* Control Panel - floating in center */}

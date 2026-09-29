@@ -73,6 +73,7 @@ function AnimationController() {
 
 // Ocean surface component with day/night shader
 function OceanSurface() {
+  const materialRef = useRef<THREE.ShaderMaterial>(null);
   const uniforms = useMemo(
     () => ({
       sunDirection: { value: new THREE.Vector3() },
@@ -82,16 +83,19 @@ function OceanSurface() {
   );
 
   useFrame(() => {
+    const material = materialRef.current;
+    if (!material) return;
     const { dateTime, showSun } = useGeoStore.getState();
     const sunPos = calculateSubsolarPoint(dateTime);
     const [x, y, z] = latLonToCartesian(sunPos.lat, sunPos.lon, 1);
-    uniforms.sunDirection.value.set(x, y, z).normalize();
-    uniforms.showSun.value = showSun ? 1.0 : 0.0;
+    material.uniforms.sunDirection.value.set(x, y, z).normalize();
+    material.uniforms.showSun.value = showSun ? 1.0 : 0.0;
   });
 
   return (
     <Sphere args={[GLOBE_RADIUS, 64, 64]}>
       <shaderMaterial
+        ref={materialRef}
         vertexShader={oceanVertexShader}
         fragmentShader={oceanFragmentShader}
         uniforms={uniforms}
@@ -107,22 +111,6 @@ function OceanSurface() {
 // Country borders component with thicker lines for better visibility
 function CountryBorders() {
   const { land } = useWorldData();
-  
-  const uniforms = useMemo(
-    () => ({
-      sunDirection: { value: new THREE.Vector3() },
-      showSun: { value: 1.0 },
-    }),
-    []
-  );
-
-  useFrame(() => {
-    const { dateTime, showSun } = useGeoStore.getState();
-    const sunPos = calculateSubsolarPoint(dateTime);
-    const [x, y, z] = latLonToCartesian(sunPos.lat, sunPos.lon, 1);
-    uniforms.sunDirection.value.set(x, y, z).normalize();
-    uniforms.showSun.value = showSun ? 1.0 : 0.0;
-  });
 
   const borderLines = useMemo(() => {
     if (!land) return [];
